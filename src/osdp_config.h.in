@@ -8,7 +8,7 @@
 #define _OSDP_CONFIG_H_
 
 /**
- * @brief The following macros are defined defined from the variable in cmake
+ * @brief The following macros are defined from the variable in cmake
  * files. All @XXX@ are replaced by the value of XXX as resolved by cmake.
  */
 #define PROJECT_VERSION                "@PROJECT_VERSION@"
@@ -26,10 +26,14 @@
 #define OSDP_PD_POLL_TIMEOUT_MS                 (50)
 #define OSDP_PD_SC_TIMEOUT_MS                   (8 * 1000)
 #define OSDP_PD_ONLINE_TOUT_MS                  (8 * 1000)
-#define OSDP_RESP_TOUT_MS                       (200)
-#define OSDP_CMD_MAX_RETRIES                    (8)
-#define OSDP_ONLINE_RETRY_WAIT_MAX_MS           (300 * 1000)
-#define OSDP_CMD_RETRY_WAIT_MS                  (800)
+extern int osdp_resp_tout_ms_config;
+#define OSDP_RESP_TOUT_MS                       (osdp_resp_tout_ms_config)
+extern int osdp_cmd_max_retries_config;
+#define OSDP_CMD_MAX_RETRIES                    (osdp_cmd_max_retries_config)
+extern int osdp_online_retry_wait_max_ms_config;
+#define OSDP_ONLINE_RETRY_WAIT_MAX_MS           (osdp_online_retry_wait_max_ms_config)
+extern int osdp_cmd_retry_wait_ms_config;
+#define OSDP_CMD_RETRY_WAIT_MS                  (osdp_cmd_retry_wait_ms_config)
 #define OSDP_PACKET_BUF_SIZE                    (256)
 #define OSDP_RX_RB_SIZE                         (512)
 #define OSDP_CP_CMD_POOL_SIZE                   (4)
@@ -38,6 +42,6 @@
 #define OSDP_CMD_ID_OFFSET                      (5)
 #define OSDP_PCAP_LINK_TYPE                     (162)
 #define OSDP_PD_NAME_MAXLEN                     (16)
-#define OSDP_MINIMUM_PACKET_SIZE		(128)
+#define OSDP_MINIMUM_PACKET_SIZE                (128)
 
 #endif /* _OSDP_CONFIG_H_ */
