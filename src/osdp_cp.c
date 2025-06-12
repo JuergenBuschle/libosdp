@@ -891,8 +891,8 @@ static int cp_phy_state_update(struct osdp_pd *pd)
 				pd->phy_state = OSDP_CP_PHY_STATE_WAIT;
 				pd->phy_retry_count += 1;
 				pd->phy_tstamp = osdp_millis_now();
-				LOG_WRN("No response in 200ms; probing (%d)",
-					pd->phy_retry_count);
+				LOG_WRN("No response in %dms; probing (%d)",
+					OSDP_RESP_TOUT_MS, pd->phy_retry_count);
 				return OSDP_CP_ERR_CAN_YIELD;
 			}
 			LOG_ERR("Response timeout for CMD: %s(%02x)",

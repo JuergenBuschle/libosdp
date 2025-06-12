@@ -23,7 +23,8 @@
  * @brief Other OSDP constants
  */
 #define OSDP_PD_SC_RETRY_MS                     (600 * 1000)
-#define OSDP_PD_POLL_TIMEOUT_MS                 (50)
+extern int osdp_pd_poll_timeout_ms_config;
+#define OSDP_PD_POLL_TIMEOUT_MS                 (osdp_pd_poll_timeout_ms_config)
 #define OSDP_PD_SC_TIMEOUT_MS                   (8 * 1000)
 #define OSDP_PD_ONLINE_TOUT_MS                  (8 * 1000)
 extern int osdp_resp_tout_ms_config;
