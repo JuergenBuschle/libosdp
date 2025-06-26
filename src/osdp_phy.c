@@ -752,6 +752,8 @@ void osdp_phy_state_reset(struct osdp_pd *pd, bool is_error)
 	if (is_error) {
 		pd->phy_retry_count = 0;
 		pd->seq_number = -1;
+		/* NEW RETRY LOGIC: Invalidate packet cache on error reset */
+		pd->cached_packet_len = 0;
 		if (pd->channel.flush) {
 			pd->channel.flush(pd->channel.data);
 		}

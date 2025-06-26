@@ -436,6 +436,10 @@ struct osdp_pd {
 
 	/* Opaque packet capture pointer (see osdp_pcap.c) */
 	void *packet_capture_ctx;
+
+	/* NEW RETRY LOGIC: Packet caching for retries in safe states */
+	uint8_t cached_packet[OSDP_PACKET_BUF_SIZE];  /* Complete encrypted packet */
+	int cached_packet_len;                         /* 0 = no cache, >0 = valid cache */
 };
 
 struct osdp {

@@ -59,6 +59,36 @@ struct cp_cmd_node {
 	struct osdp_cmd object;
 };
 
+/* NEW RETRY LOGIC: Determine if current state allows safe packet retries */
+static bool is_retry_safe_state(struct osdp_pd *pd)
+{
+	/* Only allow retries in safe states where the secure channel state won't be affected */
+	switch (pd->state) {
+	case OSDP_CP_STATE_ONLINE:  /* Normal operations - safe for retries */
+	case OSDP_CP_STATE_INIT:    /* Initial setup - safe for retries */
+	case OSDP_CP_STATE_CAPDET:  /* Capability detection - safe for retries */
+		return true;
+	default:
+		/* Unsafe states: SC setup, keyset, etc. - retries could break security */
+		return false;
+	}
+}
+
+/* NEW RETRY LOGIC: Get state name for logging */
+static const char *state_get_name(enum osdp_cp_state_e state)
+{
+	switch (state) {
+	case OSDP_CP_STATE_INIT:      return "ID-Request";
+	case OSDP_CP_STATE_CAPDET:    return "Cap-Detect";
+	case OSDP_CP_STATE_SC_CHLNG:  return "SC-Chlng";
+	case OSDP_CP_STATE_SC_SCRYPT: return "SC-Scrypt";
+	case OSDP_CP_STATE_SET_SCBK:  return "SC-SetSCBK";
+	case OSDP_CP_STATE_ONLINE:    return "Online";
+	case OSDP_CP_STATE_OFFLINE:   return "Offline";
+	default:                      return "Unknown";
+	}
+}
+
 static int cp_cmd_queue_init(struct osdp_pd *pd)
 {
 	if (slab_init(&pd->app_data.slab,
@@ -722,22 +752,21 @@ static int cp_process_reply(struct osdp_pd *pd)
 
 	err = osdp_phy_check_packet(pd);
 
-	/* Translate phy error codes to CP errors */
+	/* NEW RETRY LOGIC: Translate phy error codes to CP errors with expanded retry handling */
 	switch (err) {
 	case OSDP_ERR_PKT_NONE:
 		break;
 	case OSDP_ERR_PKT_WAIT:
 	case OSDP_ERR_PKT_NO_DATA:
+	case OSDP_ERR_PKT_SKIP:    /* NEW: Foreign device packets - wait for correct packet */
 		return OSDP_CP_ERR_NO_DATA;
 	case OSDP_ERR_PKT_BUSY:
+	case OSDP_ERR_PKT_FMT:     /* NEW: Format errors are retryable */
+	case OSDP_ERR_PKT_CHECK:   /* NEW: Checksum/CRC errors are retryable */
 		return OSDP_CP_ERR_RETRY_CMD;
 	case OSDP_ERR_PKT_NACK:
-		/* CP cannot do anything about an invalid reply from a PD. So it
-		 * just default to going offline and retrying after a while. The
-		 * reason for this failure was probably better logged by lower
-		 * layers so we can treat it as a generic failure.
-		 */
-		__fallthrough;
+		/* NEW RETRY LOGIC: NAK responses are now retryable instead of generic failure */
+		return OSDP_CP_ERR_RETRY_CMD;
 	default:
 		return OSDP_CP_ERR_GENERIC;
 	}
@@ -830,6 +859,8 @@ static void cp_phy_state_done(struct osdp_pd *pd)
 		pd->sc_tstamp = osdp_millis_now();
 	}
 	pd->phy_retry_count = 0;
+	/* NEW RETRY LOGIC: Invalidate packet cache after successful command */
+	pd->cached_packet_len = 0;
 	pd->phy_state = OSDP_CP_PHY_STATE_DONE;
 }
 
@@ -852,11 +883,31 @@ static int cp_phy_state_update(struct osdp_pd *pd)
 		pd->phy_state = OSDP_CP_PHY_STATE_SEND_CMD;
 		__fallthrough;
 	case OSDP_CP_PHY_STATE_SEND_CMD:
-		/* Check if we have any commands in the queue */
-		if (cp_build_and_send_packet(pd)) {
-			LOG_ERR("Failed to build/send packet for CMD: %s(%02x)",
-				osdp_cmd_name(pd->cmd_id), pd->cmd_id);
-			goto error;
+		/* NEW RETRY LOGIC: Use cached packet for retries in safe states */
+		if (pd->phy_retry_count > 0 && is_retry_safe_state(pd) && pd->cached_packet_len > 0) {
+			/* Retry: Use cached packet instead of building a new one */
+			ret = osdp_phy_send_packet(pd, pd->cached_packet, pd->cached_packet_len,
+						   get_tx_buf_size(pd));
+			if (ret < 0) {
+				LOG_ERR("Failed to send cached packet for retry CMD: %s(%02x)",
+					osdp_cmd_name(pd->cmd_id), pd->cmd_id);
+				goto error;
+			}
+		} else {
+			/* New command or unsafe state: Build and cache packet */
+			if (cp_build_and_send_packet(pd)) {
+				LOG_ERR("Failed to build/send packet for CMD: %s(%02x)",
+					osdp_cmd_name(pd->cmd_id), pd->cmd_id);
+				goto error;
+			}
+			/* NEW RETRY LOGIC: Cache packet only in retry-safe states */
+			if (is_retry_safe_state(pd)) {
+				pd->cached_packet_len = pd->packet_buf_len;
+				memcpy(pd->cached_packet, pd->packet_buf, pd->packet_buf_len);
+			} else {
+				/* Unsafe state: invalidate cache */
+				pd->cached_packet_len = 0;
+			}
 		}
 		ret = OSDP_CP_ERR_INPROG;
 		osdp_phy_state_reset(pd, false);
@@ -880,6 +931,12 @@ static int cp_phy_state_update(struct osdp_pd *pd)
 			goto error;
 		}
 		if (rc == OSDP_CP_ERR_RETRY_CMD) {
+			/* NEW RETRY LOGIC: In unsafe states, retryable errors lead to OFFLINE */
+			if (!is_retry_safe_state(pd)) {
+				LOG_WRN("Retryable error in unsafe state %s - going OFFLINE",
+					state_get_name(pd->state));
+				goto error;
+			}
 			pd->phy_tstamp = osdp_millis_now();
 			pd->wait_ms = OSDP_CMD_RETRY_WAIT_MS;
 			pd->phy_state = OSDP_CP_PHY_STATE_WAIT;
@@ -907,21 +964,6 @@ static int cp_phy_state_update(struct osdp_pd *pd)
 error:
 	pd->phy_state = OSDP_CP_PHY_STATE_ERR;
 	return OSDP_CP_ERR_GENERIC;
-}
-
-static const char *state_get_name(enum osdp_cp_state_e state)
-{
-	switch (state) {
-	case OSDP_CP_STATE_INIT:      return "ID-Request";
-	case OSDP_CP_STATE_CAPDET:    return "Cap-Detect";
-	case OSDP_CP_STATE_SC_CHLNG:  return "SC-Chlng";
-	case OSDP_CP_STATE_SC_SCRYPT: return "SC-Scrypt";
-	case OSDP_CP_STATE_SET_SCBK:  return "SC-SetSCBK";
-	case OSDP_CP_STATE_ONLINE:    return "Online";
-	case OSDP_CP_STATE_OFFLINE:   return "Offline";
-	default:
-		BUG();
-	}
 }
 
 static int cp_get_online_command(struct osdp_pd *pd)
@@ -1195,6 +1237,11 @@ static void cp_state_change(struct osdp_pd *pd, enum osdp_cp_state_e next)
 
 	//FIX
 	pd->state = next;
+
+	/* NEW RETRY LOGIC: Invalidate packet cache when entering unsafe states */
+	if (!is_retry_safe_state(pd)) {
+		pd->cached_packet_len = 0;
+	}
 
 	switch (next) {
 	case OSDP_CP_STATE_INIT:
