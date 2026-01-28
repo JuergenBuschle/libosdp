@@ -728,17 +728,31 @@ static int cp_process_reply(struct osdp_pd *pd)
 		break;
 	case OSDP_ERR_PKT_WAIT:
 	case OSDP_ERR_PKT_NO_DATA:
+		if (err == OSDP_ERR_PKT_NO_DATA) {
+			LOG_DBG("PD[%d] addr=%d: No data available (waiting for response)",
+				pd->idx, pd->address);
+		}
 		return OSDP_CP_ERR_NO_DATA;
 	case OSDP_ERR_PKT_BUSY:
 		return OSDP_CP_ERR_RETRY_CMD;
+	case OSDP_ERR_PKT_SKIP:
+		LOG_DBG("PD[%d] addr=%d: Packet skipped (not addressed to us)",
+			pd->idx, pd->address);
+		return OSDP_CP_ERR_NO_DATA; /* Treat as no data, will retry */
+	case OSDP_ERR_PKT_CHECK:
+		LOG_WRN("PD[%d] addr=%d: Packet check failed (wrong address or invalid)",
+			pd->idx, pd->address);
+		return OSDP_CP_ERR_GENERIC;
 	case OSDP_ERR_PKT_NACK:
 		/* CP cannot do anything about an invalid reply from a PD. So it
 		 * just default to going offline and retrying after a while. The
 		 * reason for this failure was probably better logged by lower
 		 * layers so we can treat it as a generic failure.
 		 */
+		LOG_WRN("PD[%d] addr=%d: Received NACK", pd->idx, pd->address);
 		__fallthrough;
 	default:
+		LOG_WRN("PD[%d] addr=%d: Packet error %d", pd->idx, pd->address, err);
 		return OSDP_CP_ERR_GENERIC;
 	}
 
@@ -891,12 +905,12 @@ static int cp_phy_state_update(struct osdp_pd *pd)
 				pd->phy_state = OSDP_CP_PHY_STATE_WAIT;
 				pd->phy_retry_count += 1;
 				pd->phy_tstamp = osdp_millis_now();
-				LOG_WRN("No response in %dms; probing (%d)",
-					OSDP_RESP_TOUT_MS, pd->phy_retry_count);
+			LOG_WRN("PD[%d] addr=%d: No response in %dms; probing (%d)",
+				pd->idx, pd->address, OSDP_RESP_TOUT_MS, pd->phy_retry_count);
 				return OSDP_CP_ERR_CAN_YIELD;
 			}
-			LOG_ERR("Response timeout for CMD: %s(%02x)",
-				osdp_cmd_name(pd->cmd_id), pd->cmd_id);
+			LOG_ERR("PD[%d] addr=%d: Response timeout for CMD: %s(%02x)",
+				pd->idx, pd->address, osdp_cmd_name(pd->cmd_id), pd->cmd_id);
 			goto error;
 		}
 		ret = OSDP_CP_ERR_INPROG;

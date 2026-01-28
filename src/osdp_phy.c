@@ -70,11 +70,16 @@ static int osdp_channel_receive(struct osdp_pd *pd)
 			break;
 		}
 		if (osdp_rb_push_buf(&pd->rx_rb, buf, recv) != recv) {
-			LOG_EM("RX ring buffer overflow!");
+			LOG_EM("RX ring buffer overflow! PD[%d] addr=%d bytes=%d",
+				pd->idx, pd->address, recv);
 			return -1;
 		}
 		total_recv += recv;
 	} while (recv == sizeof(buf));
+
+	if (total_recv > 0) {
+		LOG_INF("PD[%d] addr=%d: Read %d bytes from channel", pd->idx, pd->address, total_recv);
+	}
 
 	return total_recv;
 }
@@ -339,6 +344,7 @@ static bool phy_rescan_packet_buf(struct osdp_pd *pd)
 
 	if (i < pd->packet_buf_len) {
 		/* found another SoM; move the rest of the bytes down */
+		unsigned long discarded = i - j;
 		if (i && pd->packet_buf[i - 1] == OSDP_PKT_MARK) {
 			pd->packet_buf[0] = OSDP_PKT_MARK;
 			j = 1;
@@ -351,11 +357,20 @@ static bool phy_rescan_packet_buf(struct osdp_pd *pd)
 			pd->packet_buf[j++] = pd->packet_buf[i++];
 		}
 		pd->packet_buf_len = j;
+		if (discarded > 0) {
+			LOG_WRN("PD[%d] addr=%d: Rescanned packet buffer, discarded %lu bytes, found nested SOM",
+				pd->idx, pd->address, discarded);
+		}
 		return true;
 	}
 
 	/* nothing found, discarded all */
+	unsigned long discarded = pd->packet_buf_len;
 	pd->packet_buf_len = 0;
+	if (discarded > 0) {
+		LOG_WRN("PD[%d] addr=%d: Rescan failed, discarded all %lu bytes (no SOM found)",
+			pd->idx, pd->address, discarded);
+	}
 	return false;
 }
 
@@ -370,9 +385,18 @@ static int phy_check_header(struct osdp_pd *pd)
 	/* Scan for packet start */
 	while (pd->packet_buf_len == 0) {
 		if (osdp_rb_pop(&pd->rx_rb, &cur_byte)) {
+			if (pd->packet_scan_skip > 0) {
+				LOG_WRN("PD[%d] addr=%d: No data after skipping %u bytes (no SOM found)",
+					pd->idx, pd->address, pd->packet_scan_skip);
+				pd->packet_scan_skip = 0;
+			}
 			return OSDP_ERR_PKT_NO_DATA;
 		}
 		if (cur_byte == OSDP_PKT_SOM) {
+			if (pd->packet_scan_skip > 0) {
+				LOG_WRN("PD[%d] addr=%d: Found SOM after skipping %u bytes",
+					pd->idx, pd->address, pd->packet_scan_skip);
+			}
 			if (prev_byte == OSDP_PKT_MARK) {
 				buf[0] = OSDP_PKT_MARK;
 				buf[1] = OSDP_PKT_SOM;
@@ -387,6 +411,12 @@ static int phy_check_header(struct osdp_pd *pd)
 		}
 		if (cur_byte != OSDP_PKT_MARK) {
 			pd->packet_scan_skip++;
+			/* Log when we skip many bytes - indicates desynchronization */
+			if (pd->packet_scan_skip == 10 || pd->packet_scan_skip == 50 || 
+			    pd->packet_scan_skip == 100 || (pd->packet_scan_skip % 200 == 0)) {
+				LOG_WRN("PD[%d] addr=%d: Skipping bytes looking for SOM (skipped=%u bytes, no valid packet start found)",
+					pd->idx, pd->address, pd->packet_scan_skip);
+			}
 		}
 		prev_byte = cur_byte;
 	}
@@ -465,9 +495,12 @@ static int phy_check_packet(struct osdp_pd *pd, uint8_t *buf, int pkt_len)
 	if (pd_addr != pd->address && pd_addr != 0x7F) {
 		/* not addressed to us and was not broadcasted */
 		if (is_cp_mode(pd)) {
-			LOG_ERR("Invalid pd address %d", pd_addr);
+			LOG_ERR("PD[%d] addr=%d: Received packet with wrong address %d (expected %d or broadcast 0x7F), discarding",
+				pd->idx, pd->address, pd_addr, pd->address);
 			return OSDP_ERR_PKT_CHECK;
 		}
+		LOG_WRN("PD[%d] addr=%d: Received packet addressed to %d (not for this PD), skipping",
+			pd->idx, pd->address, pd_addr);
 		return OSDP_ERR_PKT_SKIP;
 	}
 
@@ -549,12 +582,21 @@ int osdp_phy_check_packet(struct osdp_pd *pd)
 	if (pd->packet_len == 0) {
 		ret = phy_check_header(pd);
 		if (ret < 0) {
+			/* Log when we can't find a packet header */
+			if (ret == OSDP_ERR_PKT_NO_DATA) {
+				/* Already logged in phy_check_header if packet_scan_skip > 0 */
+			} else if (ret == OSDP_ERR_PKT_WAIT) {
+				/* Waiting for more data - normal, don't log */
+			} else {
+				LOG_WRN("PD[%d] addr=%d: phy_check_header failed with error %d",
+					pd->idx, pd->address, ret);
+			}
 			return ret;
 		}
 		pd->packet_len = ret;
 		if (pd->packet_scan_skip) {
-			LOG_DBG("Packet scan skipped:%u mark:%d",
-				pd->packet_scan_skip,
+			LOG_DBG("PD[%d] addr=%d: Packet scan skipped:%u mark:%d",
+				pd->idx, pd->address, pd->packet_scan_skip,
 				ISSET_FLAG(pd, PD_FLAG_PKT_HAS_MARK));
 			pd->packet_scan_skip = 0;
 		}
@@ -564,8 +606,14 @@ int osdp_phy_check_packet(struct osdp_pd *pd)
 	ret = osdp_rb_pop_buf(&pd->rx_rb, pd->packet_buf + pd->packet_buf_len,
 				pd->packet_len - pd->packet_buf_len);
 	pd->packet_buf_len += ret;
-	if (pd->packet_buf_len != pd->packet_len)
+	if (pd->packet_buf_len != pd->packet_len) {
+		/* Log when we're waiting for more bytes to complete packet */
+		if (pd->packet_buf_len > 0) {
+			LOG_DBG("PD[%d] addr=%d: Waiting for more bytes: have %lu, need %lu",
+				pd->idx, pd->address, pd->packet_buf_len, pd->packet_len);
+		}
 		return OSDP_ERR_PKT_WAIT;
+	}
 
 	if (is_packet_trace_enabled(pd)) {
 		osdp_capture_packet(pd, pd->packet_buf, pd->packet_buf_len);
