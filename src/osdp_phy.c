@@ -77,8 +77,10 @@ static int osdp_channel_receive(struct osdp_pd *pd)
 		total_recv += recv;
 	} while (recv == sizeof(buf));
 
-	if (total_recv > 0) {
-		LOG_INF("PD[%d] addr=%d: Read %d bytes from channel", pd->idx, pd->address, total_recv);
+	/* Only log if we read a significant amount (might indicate delayed reading or burst) */
+	if (total_recv > 50) {
+		LOG_WRN("PD[%d] addr=%d: Read large chunk: %d bytes from channel (delayed reading?)",
+			pd->idx, pd->address, total_recv);
 	}
 
 	return total_recv;
