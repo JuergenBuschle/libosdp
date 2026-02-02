@@ -728,10 +728,6 @@ static int cp_process_reply(struct osdp_pd *pd)
 		break;
 	case OSDP_ERR_PKT_WAIT:
 	case OSDP_ERR_PKT_NO_DATA:
-		if (err == OSDP_ERR_PKT_NO_DATA) {
-			LOG_DBG("PD[%d] addr=%d: No data available (waiting for response)",
-				pd->idx, pd->address);
-		}
 		return OSDP_CP_ERR_NO_DATA;
 	case OSDP_ERR_PKT_BUSY:
 		return OSDP_CP_ERR_RETRY_CMD;
